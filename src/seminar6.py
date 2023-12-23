@@ -1,23 +1,34 @@
 """Seminar 6. Image Binary Classification with Keras. ML ops."""
 import argparse
+import glob
 import os
 import zipfile
 import shutil
 from urllib.request import urlretrieve
-
-import keras
-from keras import layers
 import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.io import read_file, write_file
+from tensorflow.image import decode_image
+from tensorflow.keras.models import load_model
 import boto3
 import dotenv
 
 DATA_URL = 'https://storage.yandexcloud.net/fa-bucket/cats_dogs_train.zip'
-PATH_TO_DATA_ZIP = 'data/raw/cats_dogs_train.zip'
-PATH_TO_DATA = 'data/raw/cats_dogs_train'
-PATH_TO_MODEL = 'models/model_6'
+PATH_TO_DATA_ZIP = '../data/raw/cats_dogs_train.zip'
+PATH_TO_DATA = '../data/raw/cats_dogs_train'
+PATH_TO_MODEL = '../models/model_6'
 BUCKET_NAME = 'neuralnets2023'
 # todo fix your git user name and copy .env to project root
 YOUR_GIT_USER = 'Memori707'
+
+
+image_size = (180, 180)
+batch_size = 64
+
+image_size = (180, 180)
+
+batch_size = 64
 
 
 def download_data():
@@ -38,7 +49,6 @@ def download_data():
 
 def make_model(input_shape, num_classes):
     inputs = keras.Input(shape=input_shape)
-
     # Entry block
     x = layers.Rescaling(1.0 / 255)(inputs)
     x = layers.Conv2D(128, 3, strides=2, padding="same")(x)
@@ -71,26 +81,33 @@ def make_model(input_shape, num_classes):
 
     x = layers.GlobalAveragePooling2D()(x)
     if num_classes == 2:
+        activation = "sigmoid"
         units = 1
     else:
+        activation = "softmax"
         units = num_classes
 
-    x = layers.Dropout(0.25)(x)
-    # We specify activation=None so as to return logits
-    outputs = layers.Dense(units, activation=None)(x)
+    x = layers.Dropout(0.5)(x)
+    outputs = layers.Dense(units, activation=activation)(x)
     return keras.Model(inputs, outputs)
 
 
-def train():
-    """Pipeline: Build, train and save model to models/model_6"""
-    # Todo: Copy some code from seminar5 and https://keras.io/examples/vision/image_classification_from_scratch/
-    print('Training model')
+def fi():
+    num_deleted = 0
+    for folder_name in ("Cat", "Dog"):
+        folder_path = os.path.join(PATH_TO_DATA + "/PetImages", folder_name, '/*.jpg')
+        for image in sorted(glob.glob(folder_path)):
+            img = read_file(str(image))
+            img = decode_image(img)
+            if img.shape[2] != 3:
+                num_deleted += 1
+                os.remove(image)
+    print("Deleted %d images" % num_deleted)
 
-    image_size = (180, 180)
-    batch_size = 128
 
-    train_ds, val_ds = keras.utils.image_dataset_from_directory(
-        "./data/raw/cats_dogs_train/PetImages",
+def confi():
+    train_ds, val_ds = tf.keras.utils.image_dataset_from_directory(
+        PATH_TO_DATA+"/PetImages",
         validation_split=0.2,
         subset="both",
         seed=1337,
@@ -98,20 +115,57 @@ def train():
         batch_size=batch_size,
     )
 
+    data_augmentation = keras.Sequential(
+        [
+            layers.RandomFlip("horizontal"),
+            layers.RandomRotation(0.1),
+        ]
+    )
+
+    # Apply `data_augmentation` to the training images.
+    train_ds = train_ds.map(
+        lambda img, label: (data_augmentation(img), label),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
+    # Prefetching samples in GPU memory helps maximize GPU utilization.
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+
+    return train_ds, val_ds
+
+
+def train():
+    print('Training model')
+    """Pipeline: Build, train and save model to models/model_6"""
+    # Todo: Copy some code from seminar5 and https://keras.io/examples/vision/image_classification_from_scratch/
+    train_ds, val_ds = confi()
+
+    ############
     model = make_model(input_shape=image_size + (3,), num_classes=2)
-    epochs = 1
+    epochs = 7
+
+    callbacks = [
+        keras.callbacks.ModelCheckpoint("save_at_{epoch}.keras"),
+    ]
     model.compile(
-        optimizer=keras.optimizers.Adam(3e-4),
-        loss=keras.losses.BinaryCrossentropy(from_logits=True),
-        metrics=[keras.metrics.BinaryAccuracy(name="acc")],
+        optimizer=keras.optimizers.Adam(1e-3),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
     )
     model.fit(
         train_ds,
         epochs=epochs,
+        callbacks=callbacks,
         validation_data=val_ds,
     )
     model.save(PATH_TO_MODEL)
 
+
+def load(fb):
+    # Загрузка сохраненной модели
+    loaded_model = load_model(fb)
+    loaded_model.save(PATH_TO_MODEL)
 
 def upload():
     """Pipeline: Upload model to S3 storage"""
@@ -142,11 +196,12 @@ if __name__ == '__main__':
         description='Typical DL lifecycle pipelines.')
     parser.add_argument('--download', action='store_true', help='Download images and extract to data/raw directory')
     parser.add_argument('--train', action='store_true', help='Build, train and save model to models/seminar6_model')
+    parser.add_argument('--saved', action='store_true', help='imp saved mod')
     parser.add_argument('--upload', action='store_true', help='Upload model to S3 storage')
     args = parser.parse_args()
-    if args.download:
-        download_data()
-    if args.train:
-        train()
-    if args.upload:
-        upload()
+
+    download_data()
+    fi()
+    train()
+    load('save_at_3.keras')
+    upload()
